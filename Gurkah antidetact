@@ -1,0 +1,444 @@
+<?xml version="1.0" encoding="utf-8"?>
+<manifest package="com.example.antidetectbrowser">
+
+    <uses-permission android:name="android.permission.INTERNET" />
+    <uses-permission android:name="android.permission.ACCESS_FINE_LOCATION" />
+    <uses-permission android:name="android.permission.ACCESS_COARSE_LOCATION" />
+
+    <application
+        android:name=".MainApplication"
+        android:allowBackup="true"
+        android:icon="@mipmap/ic_launcher"
+        android:label="AntiDetect Browser"
+        android:roundIcon="@mipmap/ic_launcher_round"
+        android:supportsRtl="true"
+        android:theme="@style/Theme.AntiDetectBrowser">
+        <activity android:name=".BrowserActivity" />
+        <activity android:name=".MainActivity">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+        </activity>
+    </application>
+
+</manifest>
+package com.example.antidetectbrowser
+
+import android.app.Application
+import androidx.room.Room
+
+class MainApplication : Application() {
+    companion object {
+        lateinit var database: AppDatabase
+    }
+
+    override fun onCreate() {
+        super.onCreate()
+        database = Room.databaseBuilder(this, AppDatabase::class.java, "antidetect-db")
+            .fallbackToDestructiveMigration()
+            .build()
+    }
+} 
+package com.example.antidetectbrowser.database
+
+import androidx.room.Database
+import androidx.room.RoomDatabase
+import com.example.antidetectbrowser.models.Profile
+
+@Database(entities = [Profile::class], version = 1, exportSchema = false)
+abstract class AppDatabase : RoomDatabase() {
+    abstract fun profileDao(): ProfileDao
+}
+package com.example.antidetectbrowser.database
+
+import androidx.room.Dao
+import androidx.room.Insert
+import androidx.room.Query
+import com.example.antidetectbrowser.models.Profile
+
+@Dao
+interface ProfileDao {
+    @Insert
+    suspend fun insert(profile: Profile)
+
+    @Query("SELECT * FROM profiles")
+    fun getAll(): List<Profile>
+
+    @Query("SELECT * FROM profiles WHERE id = :id")
+    suspend fun getById(id: Int): Profile?
+}
+package com.example.antidetectbrowser.models
+
+import androidx.room.Entity
+import androidx.room.PrimaryKey
+
+@Entity(tableName = "profiles")
+data class Profile(
+    @PrimaryKey(autoGenerate = true) val id: Int = 0,
+    val name: String,
+    val userAgent: String,
+    val screenWidth: Int,
+    val screenHeight: Int,
+
+    // Proxy
+    val proxyHost: String? = null,
+    val proxyPort: Int? = null,
+    val proxyUsername: String? = null,
+    val proxyPassword: String? = null,
+
+    // SIM Section
+    val phoneNumber: String? = null,
+    val operator: String? = null,
+    val countryCode: String? = null,
+
+    // Geo + Fingerprint
+    val latitude: Double? = null,
+    val longitude: Double? = null,
+    val timezone: String? = null,
+    val languages: String? = null
+)
+package com.example.antidetectbrowser
+
+import androidx.lifecycle.LiveData
+import androidx.lifecycle.ViewModel
+import androidx.lifecycle.liveData
+import com.example.antidetectbrowser.models.Profile
+import kotlinx.coroutines.Dispatchers
+
+class ProfileViewModel : ViewModel() {
+    val profiles: LiveData<List<Profile>> = liveData(Dispatchers.IO) {
+        emit(MainApplication.database.profileDao().getAll())
+    }
+}
+package com.example.antidetectbrowser
+
+import android.view.LayoutInflater
+import android.view.View
+import android.view.ViewGroup
+import android.widget.TextView
+import androidx.recyclerview.widget.DiffUtil
+import androidx.recyclerview.widget.ListAdapter
+import androidx.recyclerview.widget.RecyclerView
+import com.example.antidetectbrowser.models.Profile
+
+class ProfileAdapter(private val onSelect: (Profile) -> Unit) :
+    ListAdapter<Profile, ProfileAdapter.ViewHolder>(DiffCallback()) {
+
+    class ViewHolder(view: View) : RecyclerView.ViewHolder(view) {
+        val tvName: TextView = TextView(view.context).apply { textSize = 18f }
+    }
+
+    override fun onCreateViewHolder(parent: ViewGroup, viewType: Int): ViewHolder {
+        val view = TextView(parent.context).apply { setPadding(32, 32, 32, 32) }
+        return ViewHolder(view)
+    }
+
+    override fun onBindViewHolder(holder: ViewHolder, position: Int) {
+        val profile = getItem(position)
+        holder.tvName.text = "${profile.name} (Tap to open)"
+        holder.itemView.setOnClickListener { onSelect(profile) }
+    }
+
+    class DiffCallback : DiffUtil.ItemCallback<Profile>() {
+        override fun areItemsTheSame(old: Profile, new: Profile) = old.id == new.id
+        override fun areContentsTheSame(old: Profile, new: Profile) = old == new
+    }
+}
+<?xml version="1.0" encoding="utf-8"?>
+<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    android:layout_width="match_parent"
+    android:layout_height="match_parent"
+    android:orientation="vertical"
+    android:padding="16dp">
+
+    <Button
+        android:id="@+id/btnCreateProfile"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:text="Create New Profile (Auto Sample)" />
+
+    <androidx.recyclerview.widget.RecyclerView
+        android:id="@+id/rvProfiles"
+        android:layout_width="match_parent"
+        android:layout_height="match_parent"
+        android:layout_marginTop="16dp" />
+
+</LinearLayout>
+package com.example.antidetectbrowser
+
+import android.content.Intent
+import android.os.Bundle
+import androidx.appcompat.app.AppCompatActivity
+import androidx.lifecycle.ViewModelProvider
+import androidx.recyclerview.widget.LinearLayoutManager
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.launch
+
+class MainActivity : AppCompatActivity() {
+    private lateinit var viewModel: ProfileViewModel
+
+    override fun onCreate(savedInstanceState: Bundle?) {
+        super.onCreate(savedInstanceState)
+        setContentView(R.layout.activity_main)
+
+        viewModel = ViewModelProvider(this)[ProfileViewModel::class.java]
+
+        val rvProfiles = findViewById<androidx.recyclerview.widget.RecyclerView>(R.id.rvProfiles)
+        rvProfiles.layoutManager = LinearLayoutManager(this)
+        val adapter = ProfileAdapter { profile -> openBrowser(profile) }
+        rvProfiles.adapter = adapter
+
+        viewModel.profiles.observe(this) { profiles ->
+            adapter.submitList(profiles)
+        }
+
+        findViewById<android.widget.Button>(R.id.btnCreateProfile).setOnClickListener {
+            createSampleProfile()
+        }
+    }
+
+    private fun createSampleProfile() {
+        val uaList = listOf(
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+            "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/119.0.0.0 Safari/537.36",
+            "Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Mobile Safari/537.36"
+        )
+
+        val cities = listOf(
+            Triple(40.7128, -74.0060, "America/New_York"),  // NYC
+            Triple(51.5074, -0.1278, "Europe/London"),      // London
+            Triple(35.6762, 139.6503, "Asia/Tokyo")         // Tokyo
+        ).random()
+
+        val profile = com.example.antidetectbrowser.models.Profile(
+            name = "Profile_${System.currentTimeMillis()}",
+            userAgent = uaList.random(),
+            screenWidth = (1024..1920).random(),
+            screenHeight = (768..1080).random(),
+            proxyHost = null, // Add real proxy here for testing
+            proxyPort = null,
+            proxyUsername = null,
+            proxyPassword = null,
+            phoneNumber = "+1${(1000000000..9999999999).random()}",
+            operator = listOf("Verizon", "AT&T", "T-Mobile").random(),
+            countryCode = "US",
+            latitude = cities.first,
+            longitude = cities.second,
+            timezone = cities.third,
+            languages = listOf("en-US,en", "en-GB,en", "ja-JP,ja").random()
+        )
+
+        CoroutineScope(Dispatchers.IO).launch {
+            MainApplication.database.profileDao().insert(profile)
+        }
+    }
+
+    private fun openBrowser(profile: com.example.antidetectbrowser.models.Profile) {
+        val intent = Intent(this, BrowserActivity::class.java)
+        intent.putExtra("PROFILE_ID", profile.id)
+        startActivity(intent)
+    }
+}
+<?xml version="1.0" encoding="utf-8"?>
+<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    android:layout_width="match_parent"
+    android:layout_height="match_parent"
+    android:orientation="vertical">
+
+    <LinearLayout
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:orientation="horizontal"
+        android:padding="8dp">
+
+        <EditText
+            android:id="@+id/etUrl"
+            android:layout_width="0dp"
+            android:layout_height="wrap_content"
+            android:layout_weight="1"
+            android:hint="Enter URL (e.g. browserleaks.com)" />
+
+        <Button
+            android:id="@+id/btnGo"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:text="Go" />
+    </LinearLayout>
+
+    <WebView
+        android:id="@+id/webView"
+        android:layout_width="match_parent"
+        android:layout_height="match_parent" />
+
+</LinearLayout>
+package com.example.antidetectbrowser
+
+import android.os.Bundle
+import android.webkit.*
+import androidx.appcompat.app.AppCompatActivity
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
+
+class BrowserActivity : AppCompatActivity() {
+    private lateinit var webView: WebView
+    private var profile: com.example.antidetectbrowser.models.Profile? = null
+
+    override fun onCreate(savedInstanceState: Bundle?) {
+        super.onCreate(savedInstanceState)
+        setContentView(R.layout.activity_browser)
+
+        val profileId = intent.getIntExtra("PROFILE_ID", -1)
+        webView = findViewById(R.id.webView)
+
+        CoroutineScope(Dispatchers.IO).launch {
+            profile = MainApplication.database.profileDao().getById(profileId)
+            withContext(Dispatchers.Main) {
+                setupWebView()
+            }
+        }
+    }
+
+    private fun setupWebView() {
+        val settings = webView.settings
+        settings.javaScriptEnabled = true
+        settings.userAgentString = profile?.userAgent
+
+        setProxyForWebView(profile?.proxyHost, profile?.proxyPort)
+
+        webView.webViewClient = object : WebViewClient() {
+            override fun onPageFinished(view: WebView?, url: String?) {
+                injectAntiDetectJS()
+                injectSimSpoofJS()
+                injectGeoSpoofJS()
+            }
+
+            override fun onReceivedHttpAuthRequest(view: WebView?, handler: HttpAuthHandler?, host: String?, realm: String?) {
+                if (profile?.proxyUsername != null && profile?.proxyPassword != null) {
+                    handler?.proceed(profile!!.proxyUsername, profile!!.proxyPassword)
+                } else {
+                    super.onReceivedHttpAuthRequest(view, handler, host, realm)
+                }
+            }
+        }
+
+        findViewById<android.widget.Button>(R.id.btnGo).setOnClickListener {
+            var url = findViewById<android.widget.EditText>(R.id.etUrl).text.toString()
+            if (!url.startsWith("http")) url = "https://$url"
+            webView.loadUrl(url)
+        }
+
+        webView.loadUrl("https://browserleaks.com")
+    }
+
+    private fun setProxyForWebView(host: String?, port: Int?) {
+        if (host == null || port == null) return
+        System.setProperty("http.proxyHost", host)
+        System.setProperty("http.proxyPort", port.toString())
+        System.setProperty("https.proxyHost", host)
+        System.setProperty("https.proxyPort", port.toString())
+    }
+
+    private fun injectAntiDetectJS() {
+        val tz = profile?.timezone ?: "UTC"
+        val langs = profile?.languages ?: "en-US,en"
+
+        val js = """
+            (function() {
+                // Canvas + WebGL noise
+                const getContext = HTMLCanvasElement.prototype.getContext;
+                HTMLCanvasElement.prototype.getContext = function(type) {
+                    const ctx = getContext.apply(this, arguments);
+                    if (type === '2d') {
+                        const originalFillText = ctx.fillText;
+                        ctx.fillText = function(text, x, y, maxWidth) {
+                            x += (Math.random() - 0.5) * 2;
+                            y += (Math.random() - 0.5) * 2;
+                            return originalFillText.apply(this, [text, x, y, maxWidth]);
+                        };
+                    }
+                    return ctx;
+                };
+
+                if (window.WebGLRenderingContext) {
+                    const originalGetParameter = WebGLRenderingContext.prototype.getParameter;
+                    WebGLRenderingContext.prototype.getParameter = function(parameter) {
+                        if (parameter === 37445 || parameter === 37446) return 'Intel Inc.';
+                        return originalGetParameter.apply(this, arguments);
+                    };
+                }
+
+                // Hardware/Timezone/Languages
+                Object.defineProperty(navigator, 'hardwareConcurrency', { get: () => 4 + Math.floor(Math.random() * 12) });
+                Object.defineProperty(Intl.DateTimeFormat.prototype, 'resolvedOptions', { value: () => ({ timeZone: '$tz' }) });
+                Object.defineProperty(navigator, 'languages', { get: () => ['$langs'.split(',')] });
+                Object.defineProperty(navigator, 'deviceMemory', { get: () => 4 + Math.floor(Math.random() * 12) });
+                Object.defineProperty(navigator, 'plugins', { get: () => [] });
+            })();
+        """.trimIndent()
+        webView.evaluateJavascript(js, null)
+    }
+
+    private fun injectSimSpoofJS() {
+        val phone = profile?.phoneNumber ?: "unknown"
+        val operator = profile?.operator ?: "unknown"
+        val country = profile?.countryCode ?: "unknown"
+
+        val js = """
+            (function() {
+                window.phoneNumber = '$phone';
+                window.operator = '$operator';
+                window.countryCode = '$country';
+            })();
+        """.trimIndent()
+        webView.evaluateJavascript(js, null)
+    }
+
+    private fun injectGeoSpoofJS() {
+        val lat = profile?.latitude ?: 0.0
+        val long = profile?.longitude ?: 0.0
+
+        val js = """
+            (function() {
+                if ('geolocation' in navigator) {
+                    navigator.geolocation.getCurrentPosition = function(success) {
+                        success({
+                            coords: {
+                                latitude: $lat,
+                                longitude: $long,
+                                accuracy: 20
+                            },
+                            timestamp: Date.now()
+                        });
+                    };
+                    navigator.geolocation.watchPosition = navigator.geolocation.getCurrentPosition;
+                }
+            })();
+        """.trimIndent()
+        webView.evaluateJavascript(js, null)
+    }
+
+    override fun onBackPressed() {
+        if (webView.canGoBack()) webView.goBack() else super.onBackPressed()
+    }
+
+    override fun onDestroy() {
+        System.clearProperty("http.proxyHost")
+        System.clearProperty("https.proxyHost")
+        super.onDestroy()
+    }
+} 
+dependencies {
+    implementation("androidx.core:core-ktx:1.13.1")
+    implementation("androidx.appcompat:appcompat:1.7.0")
+    implementation("com.google.android.material:material:1.12.0")
+    implementation("androidx.constraintlayout:constraintlayout:2.1.4")
+    implementation("androidx.lifecycle:lifecycle-viewmodel-ktx:2.8.6")
+    implementation("androidx.lifecycle:lifecycle-livedata-ktx:2.8.6")
+    implementation("androidx.room:room-runtime:2.6.1")
+    implementation("androidx.room:room-ktx:2.6.1")
+    ksp("androidx.room:room-compiler:2.6.1")  // or annotationProcessor if not using ksp
+} 
